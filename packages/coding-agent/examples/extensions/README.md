@@ -57,6 +57,12 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `pirate.ts`            | Demonstrates `systemPromptAppend` to dynamically modify system prompt |
 | `custom-compaction.ts` | Custom compaction that summarizes entire conversation                 |
 
+### Training & Fine-Tuning
+
+| Extension              | Description                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `fine-tune-dataset.ts` | Collect rated conversation turns for model fine-tuning in SFT and DPO formats (saved to ~/.omp) |
+
 ### External Dependencies
 
 | Extension         | Description                                                               |
