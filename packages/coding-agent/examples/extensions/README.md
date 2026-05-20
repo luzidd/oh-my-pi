@@ -18,6 +18,7 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 | Extension                | Description                                                                  |
 | ------------------------ | ---------------------------------------------------------------------------- |
+| `allowlist-gate.ts`      | Inverted permission model: requires confirmation for all tools except read-only operations (deny-by-default) |
 | `permission-gate.ts`     | Prompts for confirmation before dangerous bash commands (rm -rf, sudo, etc.) |
 | `protected-paths.ts`     | Blocks writes to protected paths (.env, .git/, node_modules/)                |
 | `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, branch)          |
