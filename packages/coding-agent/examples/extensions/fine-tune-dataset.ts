@@ -2,8 +2,8 @@
  * Fine-Tuning Dataset Extension
  *
  * Collects conversation turns with quality ratings for building fine-tuning
- * datasets. Logs rated prompt/response pairs that can be post-processed into
- * SFT, DPO, or other training formats offline.
+ * datasets. Logs rated prompt/response pairs (including thinking content if present)
+ * that can be post-processed into SFT, DPO, or other training formats offline.
  *
  * Usage:
  *   pi --extension examples/extensions/fine-tune-dataset.ts
@@ -13,10 +13,10 @@
  * Data is saved to the configured directory (default: ~/.omp/fine-tune-data).
  *
  * Output file:
- *   - rated-turns.jsonl: {"timestamp": 123, "prompt": "...", "response": "...", "rating": 5, "model": "...", "provider": "..."}
+ *   - rated-turns.jsonl: {"timestamp": 123, "prompt": "...", "thinking": "..." | undefined, "response": "...", "rating": 5, "model": "...", "provider": "..."}
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import type { AssistantMessage, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, TextContent, ThinkingContent } from "@oh-my-pi/pi-ai";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,6 +25,7 @@ interface Turn {
 	userMessage: string;
 	assistantMessage: string;
 	assistantRaw: AssistantMessage;
+	thinking?: string;
 }
 
 interface RatedTurn extends Turn {
@@ -76,6 +77,12 @@ export default function (pi: ExtensionAPI) {
 		const assistantMsg = event.message;
 		if (assistantMsg.role !== "assistant") return;
 
+		// Extract thinking content from assistant message
+		const thinking = assistantMsg.content
+			.filter((c): c is ThinkingContent => c.type === "thinking")
+			.map(c => c.thinking)
+			.join("\n");
+
 		// Extract text content from assistant message
 		const textContent = assistantMsg.content
 			.filter((c): c is TextContent => c.type === "text")
@@ -88,6 +95,7 @@ export default function (pi: ExtensionAPI) {
 			userMessage: lastUserMessage,
 			assistantMessage: textContent,
 			assistantRaw: assistantMsg,
+			thinking: thinking || undefined,
 		};
 
 		// Ask user to rate this response
@@ -141,6 +149,7 @@ export default function (pi: ExtensionAPI) {
 		const entry = {
 			timestamp: turn.timestamp,
 			prompt: turn.userMessage,
+			thinking: turn.thinking,
 			response: turn.assistantMessage,
 			rating: turn.rating,
 			model: turn.assistantRaw.model,

@@ -456,6 +456,20 @@ Key ideas:
 
 For architecture and contribution guidelines, see [packages/coding-agent/DEVELOPMENT.md](packages/coding-agent/DEVELOPMENT.md).
 
+### Fine-Tuning Dataset Tools
+
+Build training datasets from your own oh-my-pi sessions:
+
+```bash
+# Rate your sessions interactively
+./scripts/rate-sessions.py --recent 7
+
+# Convert to SFT/DPO formats
+./scripts/convert-to-training-format.py
+```
+
+See [docs/fine-tuning-datasets.md](docs/fine-tuning-datasets.md) for the complete workflow and training examples.
+
 ---
 
 ## Monorepo Packages
