@@ -2,22 +2,26 @@
 """
 Batch Rating Tool for oh-my-pi Sessions
 
-Processes existing session JSONL files, extracts conversation turns,
+Processes existing session JSONL files, extracts conversation segments with context,
 and collects quality ratings for building fine-tuning datasets.
 
 Usage:
-    python scripts/rate-sessions.py                    # Rate all sessions
-    python scripts/rate-sessions.py --recent 7         # Last 7 days only
-    python scripts/rate-sessions.py --session <path>   # Rate specific session
+    python scripts/rate-sessions.py                      # Rate all sessions
+    python scripts/rate-sessions.py --recent 7           # Last 7 days only
+    python scripts/rate-sessions.py --context-turns 5    # Include 5 prior turns
+    python scripts/rate-sessions.py --session <path>     # Rate specific session
 
 Output:
     ~/.omp/fine-tune-data/rated-turns.jsonl
     
-The output file contains one entry per rated turn:
+The output file contains one entry per rated conversation segment:
     {
-        "prompt": "...",
-        "thinking": "..." | null,
-        "response": "...",
+        "messages": [
+            {"role": "user", "content": "..."},
+            {"role": "assistant", "content": "...<tool_use>...</tool_use>"},
+            {"role": "toolResult", "content": "<tool_result>...</tool_result>"},
+            ...
+        ],
         "rating": 1-5,
         "model": "...",
         "provider": "...",
@@ -25,9 +29,15 @@ The output file contains one entry per rated turn:
         "timestamp": 1234567890
     }
 
+Conversation context:
+    Each entry includes the last N user-assistant exchanges plus the current turn,
+    including tool calls and tool results. This provides full context for the agent's
+    decision-making process.
+
 Post-processing for training:
-    - SFT: Filter rating >= 4, convert to {"messages": [...]}
-    - DPO: Group by prompt, pair high/low ratings as chosen/rejected
+    - SFT: Filter rating >= 4, use messages array directly (includes tools)
+    - DPO: Group by context, pair high/low ratings as chosen/rejected
+    - Tool calls and results are preserved in <tool_use> and <tool_result> tags
 """
 
 import argparse
@@ -39,8 +49,9 @@ from typing import Any, Dict, List, Optional
 
 
 class SessionRater:
-    def __init__(self, output_file: Path, skip_rated: bool = True):
+    def __init__(self, output_file: Path, context_turns: int = 3, skip_rated: bool = True):
         self.output_file = output_file
+        self.context_turns = context_turns
         self.skip_rated = skip_rated
         self.rated_sessions: set[str] = set()
         self.stats = {
@@ -85,11 +96,10 @@ class SessionRater:
         
         return session_id, messages
     
-    def extract_turns(self, messages: List[Dict[str, Any]], session_id: str) -> List[Dict[str, Any]]:
-        """Extract user/assistant conversation turns."""
-        turns = []
-        last_user = None
-        last_user_timestamp = None
+    def extract_conversations(self, messages: List[Dict[str, Any]], session_id: str) -> List[Dict[str, Any]]:
+        """Extract conversation segments with context window, including tool calls and results."""
+        # First, parse all messages into training format
+        parsed_messages = []
         
         for msg in messages:
             role = msg.get("role")
@@ -107,13 +117,17 @@ class SessionRater:
                     )
                 
                 if text.strip():
-                    last_user = text
-                    last_user_timestamp = msg.get("timestamp")
+                    parsed_messages.append({
+                        "role": "user",
+                        "content": text,
+                        "timestamp": msg.get("timestamp"),
+                    })
             
-            elif role == "assistant" and last_user:
-                # Extract thinking blocks
+            elif role == "assistant":
+                # Extract thinking, text, and tool calls
                 thinking_parts = []
                 text_parts = []
+                tool_calls = []
                 
                 if isinstance(content, str):
                     text_parts.append(content)
@@ -123,55 +137,196 @@ class SessionRater:
                             thinking_parts.append(c.get("thinking", ""))
                         elif c.get("type") == "text":
                             text_parts.append(c.get("text", ""))
+                        elif c.get("type") == "toolCall":
+                            # Format tool call as XML-like structure
+                            tool_name = c.get("name", "unknown")
+                            tool_id = c.get("id", "")
+                            tool_args = c.get("arguments", {})
+                            tool_calls.append({
+                                "id": tool_id,
+                                "name": tool_name,
+                                "arguments": tool_args,
+                            })
                 
-                thinking = "\n".join(thinking_parts) if thinking_parts else None
-                response = "\n".join(text_parts)
+                # Build full content
+                content_parts = []
+                if thinking_parts:
+                    content_parts.append(f"<thinking>\n{'\n'.join(thinking_parts)}\n</thinking>")
+                if text_parts:
+                    content_parts.append("\n".join(text_parts))
                 
-                if response.strip():
-                    turns.append({
-                        "prompt": last_user,
-                        "thinking": thinking,
-                        "response": response,
+                # Add tool calls if present
+                if tool_calls:
+                    for tc in tool_calls:
+                        content_parts.append(
+                            f"<tool_use>\n"
+                            f"<name>{tc['name']}</name>\n"
+                            f"<id>{tc['id']}</id>\n"
+                            f"<arguments>{json.dumps(tc['arguments'])}</arguments>\n"
+                            f"</tool_use>"
+                        )
+                
+                full_content = "\n".join(content_parts)
+                
+                if full_content.strip():
+                    parsed_messages.append({
+                        "role": "assistant",
+                        "content": full_content,
                         "model": msg.get("model"),
                         "provider": msg.get("provider"),
-                        "session_id": session_id,
-                        "timestamp": msg.get("timestamp") or last_user_timestamp,
+                        "timestamp": msg.get("timestamp"),
                     })
+            
+            elif role == "toolResult":
+                # Include tool results in the conversation
+                tool_name = msg.get("toolName", "unknown")
+                tool_id = msg.get("toolCallId", "")
+                is_error = msg.get("isError", False)
                 
-                last_user = None
-                last_user_timestamp = None
+                # Extract result content
+                result_parts = []
+                if isinstance(content, str):
+                    result_parts.append(content)
+                else:
+                    for c in content:
+                        if c.get("type") == "text":
+                            result_parts.append(c.get("text", ""))
+                        elif c.get("type") == "image":
+                            result_parts.append("[Image output]")
+                
+                result_text = "\n".join(result_parts)
+                
+                # Format as tool result message
+                content_str = (
+                    f"<tool_result>\n"
+                    f"<name>{tool_name}</name>\n"
+                    f"<id>{tool_id}</id>\n"
+                    f"<is_error>{is_error}</is_error>\n"
+                    f"<content>\n{result_text}\n</content>\n"
+                    f"</tool_result>"
+                )
+                
+                parsed_messages.append({
+                    "role": "toolResult",
+                    "content": content_str,
+                    "timestamp": msg.get("timestamp"),
+                })
         
-        return turns
+        # Now create conversation segments with sliding window
+        # Group by user messages - each user message starts a new turn
+        user_turn_starts = [
+            i for i, m in enumerate(parsed_messages)
+            if m["role"] == "user"
+        ]
+        
+        conversations = []
+        
+        for turn_idx, user_idx in enumerate(user_turn_starts):
+            # Find the end of this turn (next user message or end of conversation)
+            if turn_idx + 1 < len(user_turn_starts):
+                turn_end = user_turn_starts[turn_idx + 1]
+            else:
+                turn_end = len(parsed_messages)
+            
+            # Check if there's at least one assistant response in this turn
+            turn_messages = parsed_messages[user_idx:turn_end]
+            has_assistant = any(m["role"] == "assistant" for m in turn_messages)
+            
+            if not has_assistant:
+                continue  # Skip incomplete turns
+            
+            # Find context start: go back N complete turns
+            context_start = 0
+            turns_back = 0
+            for i in range(turn_idx - 1, -1, -1):
+                turns_back += 1
+                if turns_back >= self.context_turns:
+                    context_start = user_turn_starts[i]
+                    break
+            
+            # Build messages array: context + current turn
+            context_messages = [
+                {"role": m["role"], "content": m["content"]}
+                for m in parsed_messages[context_start:turn_end]
+            ]
+            
+            # Get metadata from last assistant message in this turn
+            last_assistant = None
+            for m in reversed(turn_messages):
+                if m["role"] == "assistant":
+                    last_assistant = m
+                    break
+            
+            if last_assistant:
+                conversations.append({
+                    "messages": context_messages,
+                    "model": last_assistant.get("model"),
+                    "provider": last_assistant.get("provider"),
+                    "session_id": session_id,
+                    "timestamp": last_assistant.get("timestamp"),
+                })
+        
+        return conversations
     
     def display_turn(self, turn: Dict[str, Any], index: int, total: int):
-        """Display a turn for rating."""
+        """Display a conversation segment for rating."""
         print(f"\n{'='*70}")
         print(f"Turn {index + 1}/{total}")
         print(f"{'='*70}")
         
-        # User prompt
-        prompt = turn["prompt"]
-        prompt_preview = prompt[:500] + ("..." if len(prompt) > 500 else "")
-        print(f"\n👤 USER ({len(prompt)} chars):")
-        print(f"{prompt_preview}")
+        messages = turn["messages"]
         
-        # Thinking (if present)
-        if turn["thinking"]:
-            thinking = turn["thinking"]
-            thinking_preview = thinking[:300] + ("..." if len(thinking) > 300 else "")
-            print(f"\n🧠 THINKING ({len(thinking)} chars):")
-            print(f"{thinking_preview}")
+        # Find where current turn starts (last user message before final assistant)
+        current_turn_start = 0
+        user_indices = [i for i, m in enumerate(messages) if m["role"] == "user"]
+        if user_indices:
+            current_turn_start = user_indices[-1]
         
-        # Assistant response
-        response = turn["response"]
-        response_preview = response[:500] + ("..." if len(response) > 500 else "")
-        print(f"\n🤖 ASSISTANT ({len(response)} chars):")
-        print(f"{response_preview}")
+        # Show context messages (everything before current turn)
+        if current_turn_start > 0:
+            context_msgs = messages[:current_turn_start]
+            print(f"\n📚 CONTEXT ({len(context_msgs)} prior messages):")
+            
+            # Show user messages from context with previews
+            for i, msg in enumerate(context_msgs):
+                if msg["role"] == "user":
+                    preview = msg["content"][:100] + ("..." if len(msg["content"]) > 100 else "")
+                    print(f"  👤 {preview}")
+        
+        # Show current turn (last user + all assistant/toolResult responses)
+        print(f"\n{'─'*70}")
+        print("CURRENT TURN:")
+        print(f"{'─'*70}")
+        
+        current_turn_msgs = messages[current_turn_start:]
+        
+        for msg in current_turn_msgs:
+            if msg["role"] == "user":
+                user_content = msg["content"]
+                user_preview = user_content[:500] + ("..." if len(user_content) > 500 else "")
+                print(f"\n👤 USER ({len(user_content)} chars):")
+                print(f"{user_preview}")
+            
+            elif msg["role"] == "assistant":
+                assistant_content = msg["content"]
+                # Show preview (thinking + text, skip tool_use tags for display)
+                lines = assistant_content.split("\n")
+                preview_lines = [l for l in lines[:10] if not l.startswith("<tool_use>")]
+                assistant_preview = "\n".join(preview_lines)
+                if len(assistant_content) > len(assistant_preview):
+                    assistant_preview += "\n..."
+                
+                print(f"\n🤖 ASSISTANT ({len(assistant_content)} chars):")
+                print(f"{assistant_preview}")
         
         # Metadata
         print(f"\n📊 Model: {turn['provider']}/{turn['model']}")
         if turn["timestamp"]:
-            ts = datetime.fromisoformat(turn["timestamp"].replace("Z", "+00:00"))
+            # Handle both integer (milliseconds) and ISO string timestamps
+            if isinstance(turn["timestamp"], int):
+                ts = datetime.fromtimestamp(turn["timestamp"] / 1000.0)
+            else:
+                ts = datetime.fromisoformat(turn["timestamp"].replace("Z", "+00:00"))
             print(f"📅 Time: {ts.strftime('%Y-%m-%d %H:%M:%S')}")
     
     def get_rating(self) -> Optional[int]:
@@ -184,7 +339,14 @@ class SessionRater:
         print(f"{'─'*70}")
         
         while True:
-            choice = input("Your rating: ").strip().lower()
+            try:
+                choice = input("Your rating: ").strip().lower()
+            except KeyboardInterrupt:
+                print("\n\n👋 Interrupted, exiting...")
+                return None
+            
+            if not choice:
+                continue  # Empty input, prompt again
             
             if choice == "q":
                 return None
@@ -196,11 +358,9 @@ class SessionRater:
             print("❌ Invalid input! Use 1-5, s, or q")
     
     def save_rated_turn(self, turn: Dict[str, Any], rating: int):
-        """Append rated turn to output file."""
+        """Append rated conversation to output file."""
         entry = {
-            "prompt": turn["prompt"],
-            "thinking": turn["thinking"],
-            "response": turn["response"],
+            "messages": turn["messages"],
             "rating": rating,
             "model": turn["model"],
             "provider": turn["provider"],
@@ -231,7 +391,7 @@ class SessionRater:
             print(f"  ⏭️  Already rated, skipping")
             return True
         
-        turns = self.extract_turns(messages, session_id)
+        turns = self.extract_conversations(messages, session_id)
         
         if not turns:
             print("  ⚠️  No conversation turns found, skipping")
@@ -335,6 +495,13 @@ def main():
         help="Rate a specific session file",
     )
     parser.add_argument(
+        "--context-turns",
+        type=int,
+        metavar="N",
+        default=3,
+        help="Number of prior turns to include as context (default: 3)",
+    )
+    parser.add_argument(
         "--no-resume",
         action="store_true",
         help="Don't skip already-rated sessions",
@@ -358,7 +525,11 @@ def main():
         print(f"   (from last {args.recent} days)")
     
     # Create rater and process sessions
-    rater = SessionRater(args.output, skip_rated=not args.no_resume)
+    rater = SessionRater(
+        args.output, 
+        context_turns=args.context_turns,
+        skip_rated=not args.no_resume
+    )
     
     for session_file in sessions:
         if not rater.rate_session(session_file):

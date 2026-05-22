@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Convert rated turns to training formats (SFT and DPO).
+Convert rated conversations to training formats (SFT and DPO).
 
 Takes the output from rate-sessions.py and converts it to formats
 suitable for fine-tuning with Unsloth, TRL, or other training libraries.
@@ -10,6 +10,17 @@ Usage:
 
 Input:
     ~/.omp/fine-tune-data/rated-turns.jsonl
+    
+    Format:
+        {
+            "messages": [
+                {"role": "user", "content": "..."},
+                {"role": "assistant", "content": "<thinking>...</thinking>..."}
+            ],
+            "rating": 5,
+            "model": "...",
+            "provider": "..."
+        }
 
 Output:
     ~/.omp/fine-tune-data/sft-dataset.jsonl     # SFT format (rating >= 4)
@@ -39,18 +50,23 @@ def load_rated_turns(input_file: Path) -> List[Dict[str, Any]]:
 
 def convert_to_sft(turns: List[Dict[str, Any]], min_rating: int = 4) -> List[Dict[str, Any]]:
     """
-    Convert to SFT format: standard chat messages.
+    Convert to SFT format: standard chat messages with context.
     
     Format:
         {
             "messages": [
                 {"role": "user", "content": "..."},
-                {"role": "assistant", "content": "..."}
+                {"role": "assistant", "content": "..."},
+                {"role": "user", "content": "..."},
+                {"role": "assistant", "content": "<thinking>...</thinking>..."}
             ],
             "rating": 5,
             "model": "...",
             "provider": "..."
         }
+    
+    Training objective: The model learns to predict the last assistant message
+    given all prior messages as context.
     """
     sft_entries = []
     
@@ -58,18 +74,9 @@ def convert_to_sft(turns: List[Dict[str, Any]], min_rating: int = 4) -> List[Dic
         if turn["rating"] < min_rating:
             continue
         
-        # Build assistant content (thinking + response)
-        assistant_parts = []
-        if turn.get("thinking"):
-            assistant_parts.append(f"<thinking>\n{turn['thinking']}\n</thinking>")
-        assistant_parts.append(turn["response"])
-        assistant_content = "\n".join(assistant_parts)
-        
+        # Pass through the messages array directly
         entry = {
-            "messages": [
-                {"role": "user", "content": turn["prompt"]},
-                {"role": "assistant", "content": assistant_content},
-            ],
+            "messages": turn["messages"],
             "rating": turn["rating"],
             "model": turn["model"],
             "provider": turn["provider"],
@@ -84,28 +91,47 @@ def convert_to_dpo(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Convert to DPO format: preference pairs.
     
-    Groups turns by prompt, creates chosen/rejected pairs where
-    higher-rated response = chosen, lower-rated = rejected.
+    Groups conversations by context (all messages except the last assistant response),
+    creates chosen/rejected pairs where higher-rated response = chosen,
+    lower-rated = rejected.
     
     Format:
         {
-            "prompt": "...",
-            "chosen": "...",
-            "rejected": "...",
+            "messages": [
+                {"role": "user", "content": "..."},   # Context
+                {"role": "assistant", "content": "..."}  # Context
+            ],
+            "chosen": "<thinking>...</thinking>...",    # Higher-rated response
+            "rejected": "...",                          # Lower-rated response
             "chosen_rating": 5,
             "rejected_rating": 2
         }
+    
+    Training objective: The model learns to prefer chosen over rejected
+    given the same conversation context.
     """
-    # Group by prompt
-    prompt_groups = defaultdict(list)
+    # Group by conversation context (all messages except last assistant)
+    context_groups = defaultdict(list)
+    
     for turn in turns:
-        # Create a normalized prompt key (strip whitespace)
-        prompt_key = turn["prompt"].strip()
-        prompt_groups[prompt_key].append(turn)
+        messages = turn["messages"]
+        # Context = all messages except the last assistant response
+        context = messages[:-1]
+        # Last assistant response is what we're comparing
+        response = messages[-1]["content"]
+        
+        # Create a key from the context (serialize to JSON for hashing)
+        context_key = json.dumps(context, sort_keys=True)
+        
+        context_groups[context_key].append({
+            "context": context,
+            "response": response,
+            "rating": turn["rating"],
+        })
     
     dpo_entries = []
     
-    for prompt, responses in prompt_groups.items():
+    for context_key, responses in context_groups.items():
         # Need at least 2 responses for comparison
         if len(responses) < 2:
             continue
@@ -123,18 +149,10 @@ def convert_to_dpo(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 if chosen["rating"] <= rejected["rating"]:
                     continue
                 
-                # Build content (thinking + response)
-                def build_content(turn):
-                    parts = []
-                    if turn.get("thinking"):
-                        parts.append(f"<thinking>\n{turn['thinking']}\n</thinking>")
-                    parts.append(turn["response"])
-                    return "\n".join(parts)
-                
                 entry = {
-                    "prompt": prompt,
-                    "chosen": build_content(chosen),
-                    "rejected": build_content(rejected),
+                    "messages": chosen["context"],  # Shared context
+                    "chosen": chosen["response"],
+                    "rejected": rejected["response"],
                     "chosen_rating": chosen["rating"],
                     "rejected_rating": rejected["rating"],
                 }

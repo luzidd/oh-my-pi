@@ -21,8 +21,11 @@ Batch-review existing session files and collect quality ratings.
 ### Basic Usage
 
 ```bash
-# Rate all sessions
+# Rate all sessions (default: 3 turns of context)
 ./scripts/rate-sessions.py
+
+# Rate with more context (5 prior turns)
+./scripts/rate-sessions.py --context-turns 5
 
 # Rate only recent sessions (last 7 days)
 ./scripts/rate-sessions.py --recent 7
@@ -34,13 +37,21 @@ Batch-review existing session files and collect quality ratings.
 ./scripts/rate-sessions.py --no-resume
 ```
 
+### Context Window
+
+By default, each rated entry includes the last **3 turns** of conversation history plus the current turn. This provides context for understanding prompts like "fix that bug" or "update the test".
+
+You can adjust this with `--context-turns N` (recommended: 3-5 turns).
+
 ### Interactive Rating
 
-For each conversation turn, you'll see:
-- 👤 User prompt
-- 🧠 Thinking blocks (if present)
-- 🤖 Assistant response
+For each conversation segment, you'll see:
+- 📚 Context messages (prior conversation)
+- 👤 User prompt (current turn)
+- 🤖 Assistant response (with thinking, text, and tool calls)
 - 📊 Model metadata
+
+Tool calls and results are included in the conversation to preserve the agent's full decision-making process.
 
 Then rate it:
 - `5` - Excellent
@@ -53,20 +64,30 @@ Then rate it:
 
 ### Output
 
-Rated turns are saved to `~/.omp/fine-tune-data/rated-turns.jsonl`:
+Rated conversations are saved to `~/.omp/fine-tune-data/rated-turns.jsonl`:
 
 ```jsonl
 {
-  "prompt": "user message...",
-  "thinking": "assistant thinking..." | null,
-  "response": "assistant response...",
+  "messages": [
+    {"role": "user", "content": "Check the login validation"},
+    {"role": "assistant", "content": "I'll examine the auth code...<tool_use>...</tool_use>"},
+    {"role": "toolResult", "content": "<tool_result>...</tool_result>"},
+    {"role": "user", "content": "fix that bug"},
+    {"role": "assistant", "content": "<thinking>...</thinking>\nI'll update..."}
+  ],
   "rating": 5,
   "model": "gemma4-26b-q6-100k",
   "provider": "llama-server-lyserg",
   "session_id": "019e44d8-cc86-7000-a54c-67ec992859a4",
-  "timestamp": "2026-05-20T10:07:35.190Z"
+  "timestamp": 1716199655190
 }
 ```
+
+**Format notes:**
+- Each entry contains a complete conversation segment with context
+- Tool calls are embedded in assistant messages as `<tool_use>` tags
+- Tool results are separate messages with `role: "toolResult"`
+- Thinking content is wrapped in `<thinking>` tags
 
 ## 2. Converting to Training Formats (`convert-to-training-format.py`)
 
@@ -81,14 +102,18 @@ Converts rated turns to SFT and DPO formats.
 ### Output Files
 
 **SFT Dataset** (`sft-dataset.jsonl`) - For supervised fine-tuning:
-- Includes only turns with rating ≥ 4
-- Standard chat format for training
+- Includes only conversations with rating ≥ 4
+- Full conversation history with tool calls and results
+- Standard chat format ready for training
 
 ```jsonl
 {
   "messages": [
-    {"role": "user", "content": "..."},
-    {"role": "assistant", "content": "<thinking>...</thinking>\n..."}
+    {"role": "user", "content": "Check the auth validation"},
+    {"role": "assistant", "content": "I'll examine...<tool_use>...</tool_use>"},
+    {"role": "toolResult", "content": "<tool_result>...</tool_result>"},
+    {"role": "user", "content": "fix that bug"},
+    {"role": "assistant", "content": "<thinking>...</thinking>\nI'll update..."}
   ],
   "rating": 5,
   "model": "...",
@@ -97,14 +122,19 @@ Converts rated turns to SFT and DPO formats.
 ```
 
 **DPO Dataset** (`dpo-dataset.jsonl`) - For preference optimization:
-- Pairs responses to the same prompt with different ratings
+- Pairs responses to the same conversation context with different ratings
 - Higher-rated = "chosen", lower-rated = "rejected"
+- Context is shared, only final assistant response differs
 
 ```jsonl
 {
-  "prompt": "user message...",
-  "chosen": "better response...",
-  "rejected": "worse response...",
+  "messages": [
+    {"role": "user", "content": "Check the validation"},
+    {"role": "assistant", "content": "..."},
+    {"role": "user", "content": "fix that bug"}
+  ],
+  "chosen": "<thinking>...</thinking>\nI'll update the regex in auth.ts...",
+  "rejected": "I'll try to fix it...",
   "chosen_rating": 5,
   "rejected_rating": 2
 }
