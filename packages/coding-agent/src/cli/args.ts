@@ -23,6 +23,7 @@ export interface Args {
 	thinking?: Effort;
 	continue?: boolean;
 	resume?: string | true;
+	prime?: string;
 	help?: boolean;
 	version?: boolean;
 	mode?: Mode;
@@ -91,6 +92,8 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 			} else {
 				result.resume = true;
 			}
+		} else if (arg === "--prime" && i + 1 < args.length) {
+			result.prime = args[++i];
 		} else if (arg === "--fork" && i + 1 < args.length) {
 			result.fork = args[++i];
 		} else if (arg === "--provider" && i + 1 < args.length) {

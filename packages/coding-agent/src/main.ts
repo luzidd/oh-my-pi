@@ -306,6 +306,12 @@ async function createSessionManager(parsed: Args, cwd: string): Promise<SessionM
 		return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
 	}
 
+	// Handle --prime: load priming conversation into a new session
+	if (parsed.prime) {
+		const { loadPrimingSession } = await import("./session/prime-loader");
+		return await loadPrimingSession(parsed.prime, cwd);
+	}
+
 	if (parsed.noSession) {
 		return SessionManager.inMemory();
 	}
@@ -649,6 +655,22 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 		}
 		process.stdout.write(`Exported to: ${result}\n`);
 		process.exit(0);
+	}
+
+	// Validate --prime usage
+	if (parsedArgs.prime) {
+		if (parsedArgs.continue) {
+			process.stderr.write(`${chalk.red("Error: --prime cannot be used with --continue")}\n`);
+			process.exit(1);
+		}
+		if (parsedArgs.resume) {
+			process.stderr.write(`${chalk.red("Error: --prime cannot be used with --resume")}\n`);
+			process.exit(1);
+		}
+		if (parsedArgs.fork) {
+			process.stderr.write(`${chalk.red("Error: --prime cannot be used with --fork")}\n`);
+			process.exit(1);
+		}
 	}
 
 	if ((parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") && parsedArgs.fileArgs.length > 0) {

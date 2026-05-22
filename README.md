@@ -456,6 +456,22 @@ Key ideas:
 
 For architecture and contribution guidelines, see [packages/coding-agent/DEVELOPMENT.md](packages/coding-agent/DEVELOPMENT.md).
 
+### Session Priming
+
+Pre-load example conversations into new sessions to establish patterns and preferences:
+
+```bash
+# Start a new session with priming conversation
+omp --prime ~/.omp/primes/coding-style.jsonl "Fix the formatting"
+```
+
+Session priming is useful for:
+- Teaching tool usage patterns
+- Establishing code style preferences
+- Loading domain-specific examples
+
+See [docs/session-priming-example.md](docs/session-priming-example.md) for usage guide and best practices.
+
 ---
 
 ## Monorepo Packages
