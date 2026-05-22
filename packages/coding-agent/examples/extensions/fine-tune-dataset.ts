@@ -1,16 +1,16 @@
 /**
  * Fine-Tuning Dataset Extension
  *
- * Collects conversation turns and prompts for quality ratings to build
- * fine-tuning datasets in SFT (Supervised Fine-Tuning) and DPO (Direct
- * Preference Optimization) formats.
+ * Collects conversation turns with quality ratings for building fine-tuning
+ * datasets. Logs rated prompt/response pairs that can be post-processed into
+ * SFT, DPO, or other training formats offline.
  *
  * Usage:
  *   pi --extension examples/extensions/fine-tune-dataset.ts
  *   pi --extension examples/extensions/fine-tune-dataset.ts --fine-tune-dir /path/to/dir
  *
  * After each assistant response, you'll be prompted to rate the quality.
- * Data is saved to the configured directory in JSONL format.
+ * Data is saved to the configured directory (default: ~/.omp/fine-tune-data).
  *
  * Output file:
  *   - rated-turns.jsonl: {"timestamp": 123, "prompt": "...", "response": "...", "rating": 5, "model": "...", "provider": "..."}
@@ -45,11 +45,6 @@ export default function (pi: ExtensionAPI) {
 
 	let pendingTurn: Turn | null = null;
 	let lastUserMessage: string | null = null;
-
-	// Ensure data directory exists
-	fs.mkdir(dataDir, { recursive: true }).catch(err => {
-		pi.logger.error("Failed to create fine-tune data directory", { error: err });
-	});
 
 	// Capture user messages from context event
 	pi.on("context", async event => {
@@ -153,8 +148,10 @@ export default function (pi: ExtensionAPI) {
 		};
 
 		try {
+			// Ensure directory exists before appending
+			await fs.mkdir(dataDir, { recursive: true });
 			const jsonLine = JSON.stringify(entry) + "\n";
-			await Bun.write(logFile, jsonLine, { createPath: true });
+			await fs.appendFile(logFile, jsonLine);
 		} catch (error) {
 			pi.logger.error("Failed to write turn to dataset", { error });
 		}

@@ -59,9 +59,9 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 ### Training & Fine-Tuning
 
-| Extension              | Description                                                                                      |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `fine-tune-dataset.ts` | Collect rated conversation turns for model fine-tuning in SFT and DPO formats (saved to ~/.omp) |
+| Extension              | Description                                                                                               |
+| ---------------------- | --------------------------------------------------------------------------------------------------------- |
+| `fine-tune-dataset.ts` | Collect rated conversation turns (prompt/response/rating) for building fine-tuning datasets (saves JSONL) |
 
 ### External Dependencies
 
