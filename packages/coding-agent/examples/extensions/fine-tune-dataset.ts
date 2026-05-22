@@ -7,19 +7,13 @@
  *
  * Usage:
  *   pi --extension examples/extensions/fine-tune-dataset.ts
+ *   pi --extension examples/extensions/fine-tune-dataset.ts --fine-tune-dir /path/to/dir
  *
  * After each assistant response, you'll be prompted to rate the quality.
- * Data is saved to ~/.omp/fine-tune-data/ in JSONL format.
+ * Data is saved to the configured directory in JSONL format.
  *
- * Output files:
- *   - sft-dataset.jsonl: {"messages": [{"role": "user", "content": "..."},
- *                                      {"role": "assistant", "content": "..."}]}
- *   - dpo-dataset.jsonl: {"prompt": "...", "chosen": "...", "rejected": "...",
- *                        "chosen_rating": N, "rejected_rating": M}
- *
- * For DPO: Pairs of responses with different ratings become chosen/rejected pairs.
- * Lower-rated responses are automatically used as "rejected" examples when
- * a higher-rated response exists for the same prompt.
+ * Output file:
+ *   - rated-turns.jsonl: {"timestamp": 123, "prompt": "...", "response": "...", "rating": 5, "model": "...", "provider": "..."}
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { AssistantMessage, TextContent } from "@oh-my-pi/pi-ai";
@@ -38,21 +32,19 @@ interface RatedTurn extends Turn {
 	timestamp: number;
 }
 
-interface DPOCandidate {
-	prompt: string;
-	responses: Array<{ content: string; rating: number; timestamp: number }>;
-}
-
 export default function (pi: ExtensionAPI) {
-	const dataDir = path.join(os.homedir(), ".omp", "fine-tune-data");
-	const sftFile = path.join(dataDir, "sft-dataset.jsonl");
-	const dpoFile = path.join(dataDir, "dpo-dataset.jsonl");
+	// Register the configuration flag
+	pi.registerFlag("fine-tune-dir", {
+		description: "Directory to save fine-tuning dataset logs",
+		type: "string",
+		default: path.join(os.homedir(), ".omp", "fine-tune-data"),
+	});
+
+	const dataDir = pi.getFlag("fine-tune-dir") ?? path.join(os.homedir(), ".omp", "fine-tune-data");
+	const logFile = path.join(dataDir, "rated-turns.jsonl");
 
 	let pendingTurn: Turn | null = null;
 	let lastUserMessage: string | null = null;
-
-	// Track responses for the same prompt for DPO pairing
-	const dpoBuffer = new Map<string, DPOCandidate>();
 
 	// Ensure data directory exists
 	fs.mkdir(dataDir, { recursive: true }).catch(err => {
@@ -134,11 +126,8 @@ export default function (pi: ExtensionAPI) {
 				timestamp: Date.now(),
 			};
 
-			// Save to SFT format (all rated responses)
-			await saveSFT(ratedTurn);
-
-			// Buffer for DPO pairing
-			await bufferForDPO(ratedTurn);
+			// Log the atomic turn
+			await logTurn(ratedTurn);
 
 			pi.logger.debug("Saved turn to fine-tuning dataset", {
 				rating,
@@ -152,81 +141,22 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Save SFT format: standard chat format
-	async function saveSFT(turn: RatedTurn): Promise<void> {
-		const sftEntry = {
-			messages: [
-				{ role: "user", content: turn.userMessage },
-				{ role: "assistant", content: turn.assistantMessage },
-			],
-			rating: turn.rating,
+	// Log the atomic turn
+	async function logTurn(turn: RatedTurn): Promise<void> {
+		const entry = {
 			timestamp: turn.timestamp,
+			prompt: turn.userMessage,
+			response: turn.assistantMessage,
+			rating: turn.rating,
 			model: turn.assistantRaw.model,
 			provider: turn.assistantRaw.provider,
 		};
 
 		try {
-			const jsonLine = JSON.stringify(sftEntry) + "\n";
-			await Bun.write(sftFile, jsonLine, { createPath: true });
+			const jsonLine = JSON.stringify(entry) + "\n";
+			await Bun.write(logFile, jsonLine, { createPath: true });
 		} catch (error) {
-			pi.logger.error("Failed to write SFT entry", { error });
-		}
-	}
-
-	// Buffer responses for DPO pairing
-	async function bufferForDPO(turn: RatedTurn): Promise<void> {
-		const prompt = turn.userMessage;
-		let candidate = dpoBuffer.get(prompt);
-
-		if (!candidate) {
-			candidate = { prompt, responses: [] };
-			dpoBuffer.set(prompt, candidate);
-		}
-
-		candidate.responses.push({
-			content: turn.assistantMessage,
-			rating: turn.rating,
-			timestamp: turn.timestamp,
-		});
-
-		// If we have multiple responses for the same prompt, try to create DPO pairs
-		if (candidate.responses.length >= 2) {
-			await createDPOPairs(candidate);
-		}
-	}
-
-	// Create DPO pairs: higher-rated = chosen, lower-rated = rejected
-	async function createDPOPairs(candidate: DPOCandidate): Promise<void> {
-		const responses = candidate.responses;
-
-		// Sort by rating descending
-		responses.sort((a, b) => b.rating - a.rating);
-
-		// Create pairs: best responses as "chosen", worse responses as "rejected"
-		for (let i = 0; i < responses.length - 1; i++) {
-			const chosen = responses[i];
-			for (let j = i + 1; j < responses.length; j++) {
-				const rejected = responses[j];
-
-				// Only create pair if there's a meaningful rating difference
-				if (chosen.rating > rejected.rating) {
-					const dpoEntry = {
-						prompt: candidate.prompt,
-						chosen: chosen.content,
-						rejected: rejected.content,
-						chosen_rating: chosen.rating,
-						rejected_rating: rejected.rating,
-						timestamp: Math.max(chosen.timestamp, rejected.timestamp),
-					};
-
-					try {
-						const jsonLine = JSON.stringify(dpoEntry) + "\n";
-						await Bun.write(dpoFile, jsonLine, { createPath: true });
-					} catch (error) {
-						pi.logger.error("Failed to write DPO entry", { error });
-					}
-				}
-			}
+			pi.logger.error("Failed to write turn to dataset", { error });
 		}
 	}
 
@@ -239,7 +169,6 @@ export default function (pi: ExtensionAPI) {
 	// Log startup
 	pi.logger.info("Fine-tune dataset extension loaded", {
 		dataDir,
-		sftFile,
-		dpoFile,
+		logFile,
 	});
 }
